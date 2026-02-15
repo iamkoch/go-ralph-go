@@ -9,5 +9,8 @@ progress.txt
 # OS files
 .DS_Store
 
+# Compiled binary
+/ralph
+
 #Claude
 .claude/
