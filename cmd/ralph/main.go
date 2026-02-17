@@ -35,12 +35,13 @@ func main() {
 
 	tool := flag.String("tool", "amp", "AI tool to use: amp or claude")
 	team := flag.Bool("team", false, "Enable agent team mode")
+	debug := flag.Bool("debug", false, "Write raw tool output to ralph-debug.log")
 	reviewPasses := flag.Int("review-passes", 0, "Number of review passes after implementation (default for stories without reviewPasses)")
 	var yes bool
 	flag.BoolVar(&yes, "yes", false, "Skip confirmation prompt")
 	flag.BoolVar(&yes, "y", false, "Skip confirmation prompt (short)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: ralph [--tool amp|claude] [--team] [--review-passes N] [--yes] [max_iterations]\n")
+		fmt.Fprintf(os.Stderr, "Usage: ralph [--tool amp|claude] [--team] [--debug] [--review-passes N] [--yes] [max_iterations]\n")
 		fmt.Fprintf(os.Stderr, "       ralph install\n")
 		fmt.Fprintf(os.Stderr, "       ralph status [--review-passes N]\n\n")
 		fmt.Fprintf(os.Stderr, "Ralph Wiggum - Long-running AI agent loop\n\n")
@@ -114,8 +115,21 @@ func main() {
 		}
 	}
 
+	// Open debug log if requested
+	var debugFile *os.File
+	if *debug {
+		var err error
+		debugFile, err = os.OpenFile("ralph-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening debug log: %v\n", err)
+			os.Exit(1)
+		}
+		defer debugFile.Close()
+		fmt.Fprintf(os.Stderr, "Debug output: ralph-debug.log\n")
+	}
+
 	// Launch the TUI
-	m := tui.NewModel(*tool, baseDir, maxIterations, *team, *reviewPasses)
+	m := tui.NewModel(*tool, baseDir, maxIterations, *team, *reviewPasses, debugFile)
 	p := tea.NewProgram(m)
 	finalModel, err := p.Run()
 	if err != nil {

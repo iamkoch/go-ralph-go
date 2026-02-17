@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -73,6 +74,8 @@ type Model struct {
 	lines <-chan string
 	done  <-chan error
 
+	debugFile *os.File
+
 	err error
 }
 
@@ -84,8 +87,9 @@ var (
 	failStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
 )
 
-// NewModel creates a new TUI model.
-func NewModel(tool, baseDir string, maxIter int, team bool, reviewDefault int) Model {
+// NewModel creates a new TUI model. If debugFile is non-nil, all tool output
+// is written to it for inspection.
+func NewModel(tool, baseDir string, maxIter int, team bool, reviewDefault int, debugFile *os.File) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -100,6 +104,7 @@ func NewModel(tool, baseDir string, maxIter int, team bool, reviewDefault int) M
 		baseDir:       baseDir,
 		team:          team,
 		reviewDefault: reviewDefault,
+		debugFile:     debugFile,
 	}
 }
 
@@ -248,6 +253,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.words = ImplementationWords
 		}
+		if m.debugFile != nil {
+			fmt.Fprintf(m.debugFile, "\n=== Iteration %d/%d — %s: %s ===\n\n", m.iteration, m.maxIter, m.storyID, m.storyTitle)
+		}
 		return m, tea.Batch(waitForLine(m.lines), waitForDone(m.done))
 
 	case toolOutputMsg:
@@ -256,6 +264,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastLines = append(m.lastLines, line)
 		if len(m.lastLines) > maxDisplayLines {
 			m.lastLines = m.lastLines[len(m.lastLines)-maxDisplayLines:]
+		}
+		if m.debugFile != nil {
+			fmt.Fprintln(m.debugFile, line)
 		}
 		return m, waitForLine(m.lines)
 

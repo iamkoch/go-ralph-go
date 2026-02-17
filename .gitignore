@@ -12,6 +12,9 @@ progress.txt
 # Compiled binary
 /ralph
 
+# Debug log
+ralph-debug.log
+
 # GoReleaser
 /dist/
 
