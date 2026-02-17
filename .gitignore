@@ -12,5 +12,8 @@ progress.txt
 # Compiled binary
 /ralph
 
-#Claude
-.claude/
+# GoReleaser
+/dist/
+
+# Claude
+/.claude/

@@ -1,28 +1,62 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
-	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/iamkoch/go-ralph-go/internal/archive"
+	"github.com/iamkoch/go-ralph-go/internal/install"
+	"github.com/iamkoch/go-ralph-go/internal/prd"
+	"github.com/iamkoch/go-ralph-go/internal/status"
+	"github.com/iamkoch/go-ralph-go/internal/tui"
 )
 
 func main() {
+	// Handle install subcommand before flag parsing
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		install.Run()
+		return
+	}
+
+	// Handle status subcommand before flag parsing
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		statusFlags := flag.NewFlagSet("status", flag.ExitOnError)
+		reviewPasses := statusFlags.Int("review-passes", 0, "Number of review passes (default for stories without reviewPasses)")
+		statusFlags.Parse(os.Args[2:])
+		baseDir := resolveBaseDir()
+		status.Run(baseDir, *reviewPasses)
+		return
+	}
+
 	tool := flag.String("tool", "amp", "AI tool to use: amp or claude")
+	team := flag.Bool("team", false, "Enable agent team mode")
+	reviewPasses := flag.Int("review-passes", 0, "Number of review passes after implementation (default for stories without reviewPasses)")
+	var yes bool
+	flag.BoolVar(&yes, "yes", false, "Skip confirmation prompt")
+	flag.BoolVar(&yes, "y", false, "Skip confirmation prompt (short)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: ralph [--tool amp|claude] [max_iterations]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: ralph [--tool amp|claude] [--team] [--review-passes N] [--yes] [max_iterations]\n")
+		fmt.Fprintf(os.Stderr, "       ralph install\n")
+		fmt.Fprintf(os.Stderr, "       ralph status [--review-passes N]\n\n")
 		fmt.Fprintf(os.Stderr, "Ralph Wiggum - Long-running AI agent loop\n\n")
+		fmt.Fprintf(os.Stderr, "Subcommands:\n")
+		fmt.Fprintf(os.Stderr, "  install  Install Ralph template files in the current directory\n")
+		fmt.Fprintf(os.Stderr, "  status   Show PRD progress and next story\n\n")
 		fmt.Fprintf(os.Stderr, "Arguments:\n")
 		fmt.Fprintf(os.Stderr, "  max_iterations  Maximum number of iterations (default 10)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nWorkflow:\n")
+		fmt.Fprintf(os.Stderr, "  1. ralph install           # scaffold PRD and prompt files\n")
+		fmt.Fprintf(os.Stderr, "  2. Edit prd.json           # define your user stories\n")
+		fmt.Fprintf(os.Stderr, "  3. ralph status            # preview progress at any time\n")
+		fmt.Fprintf(os.Stderr, "  4. ralph --tool claude 15  # run with confirmation prompt\n")
+		fmt.Fprintf(os.Stderr, "  5. ralph --yes 15          # skip confirmation, go straight to TUI\n")
 	}
 	flag.Parse()
 
@@ -41,18 +75,11 @@ func main() {
 		maxIterations = n
 	}
 
-	// Resolve base directory (where the binary lives, following symlinks)
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving executable path: %v\n", err)
-		os.Exit(1)
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving symlinks: %v\n", err)
-		os.Exit(1)
-	}
-	baseDir := filepath.Dir(exe)
+	// Resolve base directory.
+	// Priority: 1) directory of the binary (if it contains prompt files)
+	//           2) scripts/ralph/ relative to CWD
+	//           3) CWD itself
+	baseDir := resolveBaseDir()
 
 	prdFile := filepath.Join(baseDir, "prd.json")
 	progressFile := filepath.Join(baseDir, "progress.txt")
@@ -60,146 +87,84 @@ func main() {
 	lastBranchFile := filepath.Join(baseDir, ".last-branch")
 
 	// Archive previous run if branch changed
-	archivePreviousRun(prdFile, lastBranchFile, progressFile, archiveDir)
+	archive.Run(prdFile, lastBranchFile, progressFile, archiveDir)
 
 	// Track current branch
-	if branch := readBranchFromPRD(prdFile); branch != "" {
+	if branch := archive.ReadBranch(prdFile); branch != "" {
 		os.WriteFile(lastBranchFile, []byte(branch), 0644)
 	}
 
 	// Initialize progress file if it doesn't exist
 	if _, err := os.Stat(progressFile); os.IsNotExist(err) {
-		initProgressFile(progressFile)
+		archive.InitProgress(progressFile)
 	}
 
-	fmt.Printf("Starting Ralph - Tool: %s - Max iterations: %d\n", *tool, maxIterations)
+	// Pre-run confirmation
+	if !yes {
+		p, err := prd.Read(prdFile)
+		if err == nil {
+			if p.AllComplete(*reviewPasses) {
+				fmt.Print(status.Render(p, *reviewPasses))
+				fmt.Println("\nAll stories are complete!")
+				return
+			}
+			if !status.Confirm(p, *reviewPasses, *tool, maxIterations) {
+				return
+			}
+		}
+	}
 
-	for i := 1; i <= maxIterations; i++ {
-		fmt.Println()
-		fmt.Println("===============================================================")
-		fmt.Printf("  Ralph Iteration %d of %d (%s)\n", i, maxIterations, *tool)
-		fmt.Println("===============================================================")
+	// Launch the TUI
+	m := tui.NewModel(*tool, baseDir, maxIterations, *team, *reviewPasses)
+	p := tea.NewProgram(m)
+	finalModel, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
-		output := runTool(*tool, baseDir)
-
-		if strings.Contains(output, "<promise>COMPLETE</promise>") {
-			fmt.Println()
-			fmt.Println("Ralph completed all tasks!")
-			fmt.Printf("Completed at iteration %d of %d\n", i, maxIterations)
+	// Exit with appropriate code
+	if fm, ok := finalModel.(tui.Model); ok {
+		if fm.State() == tui.StateComplete {
 			os.Exit(0)
 		}
-
-		fmt.Printf("Iteration %d complete. Continuing...\n", i)
-		if i < maxIterations {
-			time.Sleep(2 * time.Second)
-		}
 	}
-
-	fmt.Println()
-	fmt.Printf("Ralph reached max iterations (%d) without completing all tasks.\n", maxIterations)
-	fmt.Printf("Check %s for status.\n", progressFile)
 	os.Exit(1)
 }
 
-// readBranchFromPRD reads the branchName field from prd.json.
-func readBranchFromPRD(prdFile string) string {
-	data, err := os.ReadFile(prdFile)
-	if err != nil {
-		return ""
+// resolveBaseDir finds the ralph working directory containing prompt files.
+func resolveBaseDir() string {
+	// 1) Try directory of the binary (original behavior, works when binary is in scripts/ralph/)
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			dir := filepath.Dir(resolved)
+			if hasPromptFiles(dir) {
+				return dir
+			}
+		}
 	}
-	var prd struct {
-		BranchName string `json:"branchName"`
+
+	// 2) Try scripts/ralph/ relative to CWD
+	if cwd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(cwd, "scripts", "ralph")
+		if hasPromptFiles(candidate) {
+			return candidate
+		}
+
+		// 3) Fall back to CWD itself
+		return cwd
 	}
-	if err := json.Unmarshal(data, &prd); err != nil {
-		return ""
-	}
-	return prd.BranchName
+
+	// Last resort
+	return "."
 }
 
-// archivePreviousRun archives progress if the PRD branch has changed since last run.
-func archivePreviousRun(prdFile, lastBranchFile, progressFile, archiveDir string) {
-	if _, err := os.Stat(prdFile); err != nil {
-		return
+func hasPromptFiles(dir string) bool {
+	// Check for either CLAUDE.md or prompt.md (the prompt templates)
+	for _, name := range []string{"CLAUDE.md", "prompt.md"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
 	}
-	if _, err := os.Stat(lastBranchFile); err != nil {
-		return
-	}
-
-	currentBranch := readBranchFromPRD(prdFile)
-	lastBranchBytes, err := os.ReadFile(lastBranchFile)
-	if err != nil {
-		return
-	}
-	lastBranch := strings.TrimSpace(string(lastBranchBytes))
-
-	if currentBranch == "" || lastBranch == "" || currentBranch == lastBranch {
-		return
-	}
-
-	// Archive the previous run
-	date := time.Now().Format("2006-01-02")
-	folderName := strings.TrimPrefix(lastBranch, "ralph/")
-	archiveFolder := filepath.Join(archiveDir, date+"-"+folderName)
-
-	fmt.Printf("Archiving previous run: %s\n", lastBranch)
-	if err := os.MkdirAll(archiveFolder, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating archive directory: %v\n", err)
-		return
-	}
-
-	copyFile(prdFile, filepath.Join(archiveFolder, "prd.json"))
-	copyFile(progressFile, filepath.Join(archiveFolder, "progress.txt"))
-	fmt.Printf("   Archived to: %s\n", archiveFolder)
-
-	// Reset progress file for new run
-	initProgressFile(progressFile)
-}
-
-// initProgressFile creates/resets a progress file with a header.
-func initProgressFile(path string) {
-	content := fmt.Sprintf("# Ralph Progress Log\nStarted: %s\n---\n", time.Now().Format(time.UnixDate))
-	os.WriteFile(path, []byte(content), 0644)
-}
-
-// copyFile copies src to dst. Errors are silently ignored (matching bash behavior).
-func copyFile(src, dst string) {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return
-	}
-	os.WriteFile(dst, data, 0644)
-}
-
-// runTool executes the AI tool and returns its captured output.
-// Output is streamed to stderr in real-time.
-func runTool(tool, baseDir string) string {
-	var cmd *exec.Cmd
-	var stdinFile string
-
-	switch tool {
-	case "amp":
-		cmd = exec.Command("amp", "--dangerously-allow-all")
-		stdinFile = filepath.Join(baseDir, "prompt.md")
-	case "claude":
-		cmd = exec.Command("claude", "--dangerously-skip-permissions", "--print")
-		stdinFile = filepath.Join(baseDir, "CLAUDE.md")
-	}
-
-	f, err := os.Open(stdinFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening %s: %v\n", stdinFile, err)
-		return ""
-	}
-	defer f.Close()
-
-	cmd.Stdin = f
-	cmd.Dir = baseDir
-
-	var buf bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stderr, &buf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &buf)
-
-	_ = cmd.Run() // Ignore exit code (matches || true in bash)
-
-	return buf.String()
+	return false
 }
