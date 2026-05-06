@@ -9,8 +9,17 @@ progress.txt
 # OS files
 .DS_Store
 
-# Compiled binary
+# Compiled binaries
 /ralph
+/ralph-*
+
+# Node
+node_modules/
+bun.lock
+
+# TypeScript build
+/dist/
+src/generated/
 
 # Debug log
 ralph-debug.log
